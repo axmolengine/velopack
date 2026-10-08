@@ -28,6 +28,28 @@ public static class WindowsTestHelper
             $"velopack_{appId}.log");
     }
 
+    /// <summary>
+    /// Where a per-user install of an application goes when the installer is not given a target
+    /// directory. Tests that run setup.exe or an MSI without one have to look here.
+    /// </summary>
+    public static string GetDefaultAppRootDir(string appId)
+    {
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Programs",
+            appId);
+    }
+
+    /// <summary>
+    /// Where a per-user install went before applications moved under the Programs directory.
+    /// </summary>
+    public static string GetLegacyAppRootDir(string appId)
+    {
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            appId);
+    }
+
     public static string ReadFileWithRetry(string path, ILogger logger)
         => TestHelper.ReadFileWithRetry(path, logger);
 

@@ -127,10 +127,13 @@ The `vpk pack` command (`PackageBuilder<T>` in `Velopack.Packaging`) runs platfo
 
 Locators (`IVelopackLocator` in C#, `VelopackLocator` in Rust) resolve platform-specific paths and app metadata. Both implementations follow the same logic and must stay in sync. All locators read app identity (ID, version, channel) from a `sq.version` manifest file.
 
+The Windows default install root is a product decision stated in the three places that have to agree on it: `known_path::default_app_root_dir` (Rust, used by `src/bins` and `src/wix-dll`), `Velopack.Windows.KnownPaths.GetAppRootDir` (C#), and `MsiTemplateData.PerUserParentFolderName` (the last one because a formatted string like `[LocalAppDataFolder]Programs\` can only be produced by Windows Installer). `Programs` is shared with other publishers' applications - delete an `{AppId}` directory, never that one.
+
 **Windows** (`WindowsVelopackLocator` / `locator.rs`):
-- Discovers install by finding `Update.exe` in the parent directory of the running executable
+- Discovers install by finding `Update.exe` in the parent directory of the running executable. The install root is never stored anywhere - it is always derived from the executable's own location or passed in via `--rootDir`/`--root`, which is what lets an application be installed to any directory.
+- Default per-user install root (setup.exe with no `--installto`, and the MSI's default `INSTALLFOLDER`): `{LocalAppData}/Programs/{AppId}`. Applications used to go directly into `{LocalAppData}/{AppId}`; setup.exe recognises a real install there and upgrades it in place, so re-running an installer does not create a second copy.
 - Layout: `{RootAppDir}/Update.exe`, `{RootAppDir}/current/sq.version`, `{RootAppDir}/current/<app files>`
-- Packages: `{RootAppDir}/packages/` if writable, otherwise falls back to `{LocalAppData}/{AppId}/packages/` (copies Update.exe there too). This fallback handles MSI installs to read-only locations like Program Files.
+- Packages: `{RootAppDir}/packages/` if writable, otherwise falls back to `{LocalAppData}/Programs/{AppId}/packages/` (copies Update.exe there too). This fallback handles MSI installs to read-only locations like Program Files. A directory holding only that cache is not an install: it has no `current/`, and `locator::is_velopack_root` is how the two are told apart.
 - Portable mode: detected by presence of `.portable` file in RootAppDir
 - Legacy fallback: if no manifest, tries parsing version from `app-{version}` directory name
 

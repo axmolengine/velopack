@@ -562,3 +562,161 @@ public class WindowsLegacyMigrationTests
         Assert.EndsWith(Environment.NewLine + "2.0.0", chk3version);
     }
 }
+
+// The default per-user install location is %LocalAppData%\Programs\{id}. Applications used to go
+// directly into %LocalAppData%, so an install found there is upgraded in place rather than having
+// a second copy started next to it.
+[SupportedOSPlatform("windows")]
+public class WindowsDefaultRootTests
+{
+    private readonly ITestOutputHelper _output;
+
+    public WindowsDefaultRootTests(ITestOutputHelper output)
+    {
+        _output = output;
+    }
+
+    [Fact]
+    public async Task FreshInstallGoesUnderPrograms()
+    {
+        Assert.SkipUnless(VelopackRuntimeInfo.IsWindows, "Windows only");
+        using var logger = _output.BuildLoggerFor<WindowsDefaultRootTests>();
+        using var _1 = TempUtil.GetTempDirectory(out var releaseDir);
+
+        const string id = "DefaultRootFresh";
+        var installDir = WindowsTestHelper.GetDefaultAppRootDir(id);
+        RemoveRoots(id);
+
+        try {
+            await WindowsPackTests.PackTestApp(id, "1.0.0", "version 1 test", releaseDir, logger);
+            RunSetup(releaseDir, id, logger);
+
+            Assert.True(File.Exists(Path.Combine(installDir, "current", "TestApp.exe")));
+            Assert.False(Directory.Exists(WindowsTestHelper.GetLegacyAppRootDir(id)));
+            logger.Info("TEST: fresh install landed under Programs");
+        } finally {
+            UninstallFrom(installDir, logger);
+            RemoveRoots(id);
+        }
+    }
+
+    [Fact]
+    public async Task InstallAtThePreviousLocationIsUpgradedInPlace()
+    {
+        Assert.SkipUnless(VelopackRuntimeInfo.IsWindows, "Windows only");
+        using var logger = _output.BuildLoggerFor<WindowsDefaultRootTests>();
+        using var _1 = TempUtil.GetTempDirectory(out var releaseDir);
+
+        const string id = "DefaultRootPrevious";
+        var previousDir = WindowsTestHelper.GetLegacyAppRootDir(id);
+        var programsDir = WindowsTestHelper.GetDefaultAppRootDir(id);
+        var appPath = Path.Combine(previousDir, "current", "TestApp.exe");
+        RemoveRoots(id);
+
+        try {
+            // An older setup.exe put the application directly in LocalAppData. --installto
+            // reproduces that without depending on the installer's own defaults.
+            await WindowsPackTests.PackTestApp(id, "1.0.0", "version 1 test", releaseDir, logger);
+            RunSetup(releaseDir, id, logger, "--installto", previousDir);
+            Assert.True(File.Exists(appPath));
+            logger.Info("TEST: v1 planted at the previous location");
+
+            // v2 given no target directory has to pick the old install up, not start a second one
+            await WindowsPackTests.PackTestApp(id, "2.0.0", "version 2 test", releaseDir, logger);
+            RunSetup(releaseDir, id, logger);
+
+            var chkVersion = WindowsTestHelper.RunNoCoverage(appPath, ["version"], previousDir, logger);
+            Assert.EndsWith(Environment.NewLine + "2.0.0", chkVersion);
+            Assert.False(Directory.Exists(programsDir));
+
+            // the uninstall entry and the shortcut have to keep describing the old location, or
+            // "Add or remove programs" and the desktop icon would launch a copy that is out of date
+            using (var key = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Default)
+                       .OpenSubKey($@"Software\Microsoft\Windows\CurrentVersion\Uninstall\{id}")) {
+                Assert.NotNull(key);
+                Assert.Equal(previousDir, key.GetValue("InstallLocation") as string);
+            }
+
+            var desktopLnk = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), id + ".lnk");
+            Assert.True(File.Exists(desktopLnk));
+            Assert.Equal(appPath, new ShellLink(desktopLnk).Target);
+            logger.Info("TEST: previous location upgraded in place");
+        } finally {
+            UninstallFrom(previousDir, logger);
+            RemoveRoots(id);
+        }
+    }
+
+    [Fact]
+    public async Task LeftoverPackagesCacheIsNotAdoptedAsAnInstall()
+    {
+        Assert.SkipUnless(VelopackRuntimeInfo.IsWindows, "Windows only");
+        using var logger = _output.BuildLoggerFor<WindowsDefaultRootTests>();
+        using var _1 = TempUtil.GetTempDirectory(out var releaseDir);
+
+        const string id = "DefaultRootCache";
+        var previousDir = WindowsTestHelper.GetLegacyAppRootDir(id);
+        var programsDir = WindowsTestHelper.GetDefaultAppRootDir(id);
+        RemoveRoots(id);
+
+        // This is what an install whose root is read-only leaves in the user's profile: packages
+        // and a copy of Update.exe, but never a `current` directory. It belongs to the other
+        // install and adopting it would mean renaming it away.
+        Directory.CreateDirectory(Path.Combine(previousDir, "packages"));
+        File.WriteAllText(Path.Combine(previousDir, "Update.exe"), "not really an executable");
+        var cacheFile = Path.Combine(previousDir, "packages", "downloaded.nupkg");
+        File.WriteAllText(cacheFile, "somebody else's download");
+
+        try {
+            await WindowsPackTests.PackTestApp(id, "1.0.0", "version 1 test", releaseDir, logger);
+            RunSetup(releaseDir, id, logger);
+
+            Assert.True(File.Exists(Path.Combine(programsDir, "current", "TestApp.exe")));
+            Assert.True(File.Exists(cacheFile));
+            logger.Info("TEST: cache at the previous location was left alone");
+        } finally {
+            // only the Programs install is real here; the updater at the other root is a decoy
+            UninstallFrom(programsDir, logger);
+            RemoveRoots(id);
+        }
+    }
+
+    static void RunSetup(string releaseDir, string id, ILogger logger, params string[] extraArgs)
+    {
+        var args = new List<string> { "--silent" };
+        args.AddRange(extraArgs);
+        WindowsTestHelper.RunNoCoverage(
+            Path.Combine(releaseDir, $"{id}-win-Setup.exe"),
+            args.ToArray(),
+            Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
+            logger);
+    }
+
+    // Going through Update.exe rather than deleting the directory is what clears the uninstall
+    // entry and the shortcuts, so a failed run cannot leave either pointing at a removed install.
+    static void UninstallFrom(string dir, ILogger logger)
+    {
+        var updatePath = Path.Combine(dir, "Update.exe");
+        if (!File.Exists(updatePath)) return;
+        try {
+            WindowsTestHelper.RunNoCoverage(updatePath, ["--silent", "--uninstall"], Environment.CurrentDirectory, logger);
+        } catch {
+            // best effort
+        }
+    }
+
+    // These install into the real user profile, so a run that throws part way through must not
+    // leave an install behind for the next one to find. The Programs parent is shared with other
+    // applications and is never touched.
+    static void RemoveRoots(string id)
+    {
+        foreach (var dir in new[] { WindowsTestHelper.GetDefaultAppRootDir(id), WindowsTestHelper.GetLegacyAppRootDir(id) }) {
+            if (!Directory.Exists(dir)) continue;
+            try {
+                IoUtil.Retry(() => IoUtil.DeleteFileOrDirectoryHard(dir), 10, 1000);
+            } catch {
+                // best effort
+            }
+        }
+    }
+}

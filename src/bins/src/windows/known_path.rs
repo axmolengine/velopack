@@ -4,7 +4,7 @@ use velopack::wide_strings::wide_to_os_string;
 use windows::{
     core::GUID,
     Win32::UI::Shell::{
-        FOLDERID_Desktop, FOLDERID_Downloads, FOLDERID_LocalAppData, FOLDERID_Profile, FOLDERID_ProgramFilesX64, FOLDERID_ProgramFilesX86,
+        FOLDERID_Desktop, FOLDERID_Downloads, FOLDERID_Profile, FOLDERID_ProgramFilesX64, FOLDERID_ProgramFilesX86,
         FOLDERID_RoamingAppData, FOLDERID_StartMenu, FOLDERID_Startup, SHGetKnownFolderPath,
     },
 };
@@ -21,10 +21,6 @@ fn get_known_folder(rfid: *const GUID) -> Result<PathBuf> {
         let path = PathBuf::from(str);
         Ok(path)
     }
-}
-
-pub fn get_local_app_data() -> Result<PathBuf> {
-    get_known_folder(&FOLDERID_LocalAppData)
 }
 
 pub fn get_roaming_app_data() -> Result<PathBuf> {

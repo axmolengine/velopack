@@ -1,4 +1,5 @@
-﻿using Velopack.Core;
+﻿using System.Runtime.Versioning;
+using Velopack.Core;
 using Velopack.Packaging;
 using Velopack.Packaging.Unix;
 using Velopack.Util;
@@ -80,6 +81,7 @@ public class CrossCompile
         // logger.LogInformation(lintOutput);
     }
 
+    [SupportedOSPlatform("windows")]
     [Theory]
     [InlineData("from-win-targets-win")]
     [InlineData("from-linux-targets-win")]
@@ -97,12 +99,14 @@ public class CrossCompile
 
         Assert.True(File.Exists(artifactPath), $"Expected {artifactPath} to exist");
 
-        var appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        var appRoot = Path.Combine(appData, artifactId);
+        // this is the one test that runs setup.exe without --installto, so it follows the default
+        var appRoot = WindowsTestHelper.GetDefaultAppRootDir(artifactId);
+        var legacyRoot = WindowsTestHelper.GetLegacyAppRootDir(artifactId);
         var appExe = Path.Combine(appRoot, "current", "TestApp.exe");
         var appUpdate = Path.Combine(appRoot, "Update.exe");
 
         IoUtil.DeleteFileOrDirectoryHard(appRoot);
+        IoUtil.DeleteFileOrDirectoryHard(legacyRoot);
 
         Assert.False(File.Exists(appExe));
 
@@ -110,6 +114,7 @@ public class CrossCompile
         logger.LogInformation(installOutput);
 
         Assert.True(File.Exists(appExe));
+        Assert.False(Directory.Exists(legacyRoot));
 
         var output = Exe.InvokeAndThrowIfNonZero(appExe, new[] { "test" }, null);
         logger.LogInformation(output);

@@ -4,6 +4,7 @@ using System.Runtime.Versioning;
 using Velopack.Logging;
 using Velopack.NuGet;
 using Velopack.Util;
+using Velopack.Windows;
 
 namespace Velopack.Locators
 {
@@ -125,9 +126,8 @@ namespace Velopack.Locators
                     PackagesDir = CreateSubDirIfDoesNotExist(RootAppDir, "packages");
                     initLog.Info($"Root directory is writable, using packages directory: {PackagesDir}");
                 } else {
-                    var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-                    if (!string.IsNullOrEmpty(localAppData) && !string.IsNullOrEmpty(AppId)) {
-                        var fallbackBase = Path.Combine(localAppData, AppId);
+                    var fallbackBase = KnownPaths.GetAppRootDir(AppId);
+                    if (fallbackBase != null) {
                         Directory.CreateDirectory(fallbackBase);
                         PackagesDir = Path.Combine(fallbackBase, "packages");
                         Directory.CreateDirectory(PackagesDir);
@@ -145,6 +145,8 @@ namespace Velopack.Locators
                                 initLog.Error($"Failed to copy Update.exe to fallback path: {ex.Message}");
                             }
                         }
+
+                        CarryOverStagedUserId(fallbackBase, initLog);
                     } else {
                         initLog.Error("Root directory is not writable and LocalAppData is unavailable. Updates may not work correctly.");
                     }
@@ -170,6 +172,30 @@ namespace Velopack.Locators
                     $"Failed to initialize {nameof(WindowsVelopackLocator)}. This could be because the program is not installed or packaged properly.");
             } else {
                 initLog.Info($"Initialized {nameof(WindowsVelopackLocator)} for {AppId} v{CurrentlyInstalledVersion}");
+            }
+        }
+
+        /// <summary>
+        /// Applications used to keep their files directly under LocalAppData, before moving under
+        /// the Programs directory. Downloaded packages are only a cache and can be re-fetched, but
+        /// the staged rollout identity has to survive the move or this user's cohort flips.
+        /// </summary>
+        void CarryOverStagedUserId(string fallbackBase, IVelopackLogger log)
+        {
+            var newPath = Path.Combine(fallbackBase, "packages", ".betaId");
+            if (File.Exists(newPath)) return;
+
+            var legacyBase = KnownPaths.GetLegacyAppRootDir(AppId);
+            if (legacyBase == null) return;
+
+            var legacyPath = Path.Combine(legacyBase, "packages", ".betaId");
+            if (!File.Exists(legacyPath)) return;
+
+            try {
+                File.Copy(legacyPath, newPath);
+                log.Info($"Carried staged user id over from {legacyPath}");
+            } catch (Exception ex) {
+                log.Warn($"Couldn't carry staged user id over from {legacyPath}: {ex.Message}");
             }
         }
     }

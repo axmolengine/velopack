@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 #[cfg(windows)]
-use crate::known_path::get_local_app_data;
+use crate::known_path::{default_app_root_dir, legacy_app_root_dir};
 
 bitflags::bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -157,8 +157,7 @@ impl VelopackLocator {
             if is_writable {
                 paths.PackagesDir = root.join("packages");
                 info!("Using root packages directory: {}", paths.PackagesDir.display());
-            } else if let Ok(app_data) = get_local_app_data() {
-                let fallback_base = app_data.join(&manifest.id);
+            } else if let Ok(fallback_base) = default_app_root_dir(&manifest.id) {
                 paths.PackagesDir = fallback_base.join("packages");
                 paths.UpdateExePath = fallback_base.join("Update.exe");
                 info!("Using fallback directory: {}", fallback_base.display());
@@ -176,6 +175,8 @@ impl VelopackLocator {
                         Err(e) => error!("Failed to copy Update.exe to fallback path: {}", e),
                     }
                 }
+
+                carry_over_staged_user_id(&fallback_base, &manifest.id);
             } else {
                 error!("Root directory is not writable and LocalAppData is unavailable. Updates may not work correctly.");
             }
@@ -360,6 +361,37 @@ impl VelopackLocator {
         }
         new_id.to_string()
     }
+}
+
+/// Apps used to keep their state directly under LocalAppData, before being moved under
+/// LocalAppData\Programs. Downloaded packages are only a cache and can be re-fetched, but the
+/// staged rollout identity has to survive the move or this user's cohort membership flips.
+#[cfg(windows)]
+fn carry_over_staged_user_id(fallback_base: &Path, app_id: &str) {
+    let new_path = fallback_base.join("packages").join(".betaId");
+    if new_path.exists() {
+        return;
+    }
+
+    if let Ok(legacy_base) = legacy_app_root_dir(app_id) {
+        let legacy_path = legacy_base.join("packages").join(".betaId");
+        if legacy_path.is_file() {
+            match std::fs::copy(&legacy_path, &new_path) {
+                Ok(_) => info!("Carried staged user id over from: {}", legacy_path.display()),
+                Err(e) => warn!("Couldn't carry staged user id over from {}: {}", legacy_path.display(), e),
+            }
+        }
+    }
+}
+
+/// Returns whether the given directory is the root of an installed Velopack app, judged from the
+/// layout described by `create_config_from_root_dir`. The manifest is not parsed, so a corrupt
+/// `sq.version` still counts as an install. A directory holding only a packages cache (`packages`
+/// plus a copied `Update.exe`, left behind when an install root is read-only) is not a root.
+#[cfg(windows)]
+pub fn is_velopack_root(dir: &Path) -> bool {
+    let config = create_config_from_root_dir(dir);
+    config.UpdateExePath.is_file() && config.ManifestPath.is_file()
 }
 
 /// Create a paths object containing default / ideal paths for a given root directory

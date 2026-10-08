@@ -14,6 +14,15 @@ public class MsiTemplateData
         ? "[ProgramFiles64Folder]"
         : "[ProgramFilesFolder]";
 
+    /// <summary>
+    /// Where a per-user install goes: LocalAppData\Programs\{AppId}. Applications used to go
+    /// straight into LocalAppData. Keep in sync with the runtime, which derives the same folder in
+    /// src/lib-rust/src/known_path.rs::default_app_root_dir and
+    /// Velopack.Windows.KnownPaths.GetAppRootDir - a formatted string like this one can only be
+    /// produced by Windows Installer, not by either runtime.
+    /// </summary>
+    public string PerUserParentFolderName => "[LocalAppDataFolder]Programs\\";
+
     public string AppId;
     public string AppTitle;
     public string AppTitleSanitized => MsiBuilder.SanitizeDirectoryString(AppTitle);

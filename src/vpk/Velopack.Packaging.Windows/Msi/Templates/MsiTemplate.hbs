@@ -135,8 +135,9 @@
         <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER"/>
 
         <!-- Optional install-dir override for sysadmins, e.g. msiexec /i app.msi VELOPACK_INSTALLDIR="D:\App".
-             When set, the forced default path (LocalAppData/ProgramFiles) is skipped in both UI and silent
-             installs. Secure so it survives the UI -> execute sequence handoff for elevated per-machine installs. -->
+             When set, the forced default path (LocalAppData\Programs / ProgramFiles) is skipped in both
+             UI and silent installs. Secure so it survives the UI -> execute sequence handoff for
+             elevated per-machine installs. -->
         <Property Id="VELOPACK_INSTALLDIR" Secure="yes"/>
         <SetProperty Id="INSTALLFOLDER" Value="[VELOPACK_INSTALLDIR]" Before="CostFinalize" Sequence="execute"
                      Condition="VELOPACK_INSTALLDIR"/>
@@ -147,7 +148,7 @@
              dual-scope packages unless installing per-machine (ALLUSERS=1). -->
         {{#if InstallLocationCurrentUserOnly}}
             <SetProperty Action="SetQuietDefaultInstallFolder" Id="INSTALLFOLDER"
-                         Value="[LocalAppDataFolder][ApplicationFolderName]" Before="CostFinalize" Sequence="execute"
+                         Value="{{PerUserParentFolderName}}[ApplicationFolderName]" Before="CostFinalize" Sequence="execute"
                          Condition="NOT Installed AND NOT VELOPACK_INSTALLDIR AND UILevel&lt;5"/>
         {{else if InstallLocationAllUsersOnly}}
             <SetProperty Action="SetQuietDefaultInstallFolder" Id="INSTALLFOLDER"
@@ -155,7 +156,7 @@
                          Condition="NOT Installed AND NOT VELOPACK_INSTALLDIR AND UILevel&lt;5"/>
         {{else}}
             <SetProperty Action="SetQuietDefaultInstallFolderPerUser" Id="INSTALLFOLDER"
-                         Value="[LocalAppDataFolder][ApplicationFolderName]" Before="CostFinalize" Sequence="execute"
+                         Value="{{PerUserParentFolderName}}[ApplicationFolderName]" Before="CostFinalize" Sequence="execute"
                          Condition="NOT Installed AND NOT VELOPACK_INSTALLDIR AND UILevel&lt;5 AND NOT ALLUSERS=1"/>
             <SetProperty Action="SetQuietDefaultInstallFolderPerMachine" Id="INSTALLFOLDER"
                          Value="{{ProgramFilesFolderName}}[ApplicationFolderName]" Before="CostFinalize" Sequence="execute"
@@ -181,7 +182,9 @@
         <Binary Id="WixUI_Bmp_New" SourceFile="{{NewIcoPath}}"/>
 
         <!-- MSI properties for app metadata (used by Rust custom actions) -->
-        <Property Id="RustAppId" Value="{{AppTitle}}"/>
+        <!-- RustAppId names the per-user folder the packages cache lives in, so it must be the
+             package id (as ApplicationFolderName is above), not the display title. -->
+        <Property Id="RustAppId" Value="{{AppId}}"/>
         <Property Id="RustAppTitle" Value="{{AppTitle}}"/>
         <Property Id="RustAppVersion" Value="{{AppVersion}}"/>
         {{#if HasRuntimeDependencies}}
@@ -335,7 +338,7 @@
                 <Publish Dialog="InstallScopeDlg" Control="Next" Property="MSIINSTALLPERUSER" Value="{}" Order="3"
                          Condition="WixAppFolder = &quot;WixPerMachineFolder&quot;"/>
                 <Publish Dialog="InstallScopeDlg" Control="Next" Property="INSTALLFOLDER"
-                         Value="[LocalAppDataFolder][ApplicationFolderName]" Order="4"
+                         Value="{{PerUserParentFolderName}}[ApplicationFolderName]" Order="4"
                          Condition="WixAppFolder = &quot;WixPerUserFolder&quot; AND NOT VELOPACK_INSTALLDIR"/>
                 <Publish Dialog="InstallScopeDlg" Control="Next" Property="INSTALLFOLDER"
                          Value="{{ProgramFilesFolderName}}[ApplicationFolderName]" Order="5"
@@ -349,7 +352,7 @@
 
             {{#if InstallLocationCurrentUserOnly}}
                 <Publish Dialog="WelcomeDlg" Control="Next" Property="INSTALLFOLDER"
-                         Value="[LocalAppDataFolder][ApplicationFolderName]" Order="1"
+                         Value="{{PerUserParentFolderName}}[ApplicationFolderName]" Order="1"
                          Condition="NOT VELOPACK_INSTALLDIR"/>
                 <Publish Dialog="WelcomeDlg" Control="Next" Property="INSTALLFOLDER"
                          Value="[VELOPACK_INSTALLDIR]" Order="1" Condition="VELOPACK_INSTALLDIR"/>

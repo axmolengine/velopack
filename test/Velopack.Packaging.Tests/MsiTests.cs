@@ -394,7 +394,7 @@ public class MsiTests
     [InlineData(InstallLocation.PerUser)]
     [InlineData(InstallLocation.PerMachine)]
     [InlineData(InstallLocation.Either)]
-    public async Task TestPackGeneratesMsiWithQuietDefaultInstallFolder(InstallLocation instLocation)
+    public async Task TestPackGeneratesMsiDefaultInstallFolder(InstallLocation instLocation)
     {
         Assert.SkipUnless(VelopackRuntimeInfo.IsWindows, "Windows only");
 
@@ -429,7 +429,7 @@ public class MsiTests
         // quiet/passive installs don't run the UI publishes which normally set the default
         // INSTALLFOLDER, so the MSI must contain execute-sequence custom actions applying the
         // same defaults (#945)
-        const string perUserFolder = "[LocalAppDataFolder][ApplicationFolderName]";
+        const string perUserFolder = @"[LocalAppDataFolder]Programs\[ApplicationFolderName]";
         const string perMachineFolder = "[ProgramFiles64Folder][ApplicationFolderName]";
         const string baseCondition = "NOT Installed AND NOT VELOPACK_INSTALLDIR AND UILevel<5";
 
@@ -451,6 +451,23 @@ public class MsiTests
             var seqCondition = db.ExecuteScalar($"SELECT `Condition` FROM `InstallExecuteSequence` WHERE `Action` = '{action}'") as string;
             Assert.Equal(condition, seqCondition);
         }
+
+        // The wizard sets the same defaults from dialog publishes instead of custom actions. Both
+        // paths have to agree, or the same package installs to a different place depending on
+        // whether somebody clicked through it.
+        string[] expectedUiFolders = instLocation switch {
+            InstallLocation.PerUser => [$@"INSTALLFOLDER=""{perUserFolder}"""],
+            InstallLocation.PerMachine => [$@"INSTALLFOLDER=""{perMachineFolder}"""],
+            _ => [$@"INSTALLFOLDER=""{perUserFolder}""", $@"INSTALLFOLDER=""{perMachineFolder}"""],
+        };
+
+        var uiFolders = db.ExecuteStringQuery("SELECT `Argument` FROM `ControlEvent` WHERE `Argument` LIKE 'INSTALLFOLDER=%'");
+        foreach (var argument in expectedUiFolders) {
+            Assert.Contains(argument, uiFolders);
+        }
+
+        // Nothing may install straight into LocalAppData any more.
+        Assert.All(uiFolders, a => Assert.DoesNotContain(@"INSTALLFOLDER=""[LocalAppDataFolder][ApplicationFolderName]""", a));
     }
 
     [Fact]
@@ -517,8 +534,7 @@ public class MsiTests
         using var _1 = TempUtil.GetTempDirectory(out var releaseDir);
 
         string id = "MsiPerUserTest";
-        var installDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), id);
+        var installDir = WindowsTestHelper.GetDefaultAppRootDir(id);
         var msiPath = Path.Combine(releaseDir, $"{id}-win.msi");
         // save v1 MSI path separately — packing v2 overwrites msiPath, and users typically
         // uninstall using the same MSI file they installed with (Windows caches it too).
@@ -539,7 +555,7 @@ public class MsiTests
             File.Copy(msiPath, v1MsiPath, true);
 
             // install via msiexec per-user. no INSTALLFOLDER is passed on purpose: silent installs
-            // must default to %LocalAppData%\{packId} even though the UI events don't fire (#945)
+            // must default to %LocalAppData%\Programs\{packId} even though the UI events don't fire (#945)
             logger.Info("TEST: Installing MSI per-user...");
             RunMsiExec($"/i \"{v1MsiPath}\" /qn", logger);
 
@@ -605,6 +621,14 @@ public class MsiTests
             Assert.Equal("2.0.0", hkcuVersion2);
             logger.Info("TEST: registry entry verified in HKCU with version 2.0.0");
 
+            // Uninstalling must not touch an installation that happens to live at the location
+            // applications used to be installed into - only a left-over packages cache there. The
+            // same id can be installed twice, and the second one is not this MSI's to delete.
+            var legacyDir = WindowsTestHelper.GetLegacyAppRootDir(id);
+            Directory.CreateDirectory(Path.Combine(legacyDir, "current"));
+            File.WriteAllText(Path.Combine(legacyDir, "Update.exe"), "not really an exe");
+            File.WriteAllText(Path.Combine(legacyDir, "current", "sq.version"), "sentinel install");
+
             // uninstall using the same MSI that was used to install.
             // (msiexec /x requires the MSI's ProductCode to match a registered product.)
             WaitUntilInstallDirUnlocked(installDir);
@@ -621,11 +645,22 @@ public class MsiTests
             // verify install dir was cleaned up
             Assert.False(Directory.Exists(installDir), $"Install directory should have been removed: {installDir}");
             logger.Info("TEST: install directory cleaned up");
+
+            Assert.True(Directory.Exists(legacyDir), $"An install at the previous location should survive: {legacyDir}");
         } finally {
             // cleanup: uninstall MSI (best effort, may already be uninstalled)
             try {
                 if (File.Exists(v1MsiPath)) {
                     RunMsiExec($"/x \"{v1MsiPath}\" /qn", logger, exitCode: null);
+                }
+            } catch {
+                // best effort cleanup
+            }
+
+            try {
+                var legacyDirToClean = WindowsTestHelper.GetLegacyAppRootDir(id);
+                if (Directory.Exists(legacyDirToClean)) {
+                    IoUtil.DeleteFileOrDirectoryHard(legacyDirToClean);
                 }
             } catch {
                 // best effort cleanup
@@ -658,10 +693,9 @@ public class MsiTests
         using var _2 = TempUtil.GetTempDirectory(out var customParent);
 
         string id = "MsiCustomDirTest";
-        // a custom install dir that is NOT the default %LocalAppData%\{id} location
+        // a custom install dir that is NOT the default %LocalAppData%\Programs\{id} location
         var customDir = Path.Combine(customParent, "Custom", "WLYS");
-        var defaultDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), id);
+        var defaultDir = WindowsTestHelper.GetDefaultAppRootDir(id);
         var msiPath = Path.Combine(releaseDir, $"{id}-win.msi");
         var appPath = Path.Combine(customDir, "current", "TestApp.exe");
 
@@ -720,8 +754,7 @@ public class MsiTests
         string id = "MsiPerMachineTest";
         var installDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), id);
-        var fallbackDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), id);
+        var fallbackDir = WindowsTestHelper.GetDefaultAppRootDir(id);
         var msiPath = Path.Combine(releaseDir, $"{id}-win.msi");
         var appPath = Path.Combine(installDir, "current", "TestApp.exe");
 
@@ -749,11 +782,19 @@ public class MsiTests
 
             // Run packagesdir check as a de-elevated (standard) user.
             // Program Files is not writable for standard users, so the locator should
-            // fallback to %LOCALAPPDATA%/{id}/packages.
+            // fallback to %LOCALAPPDATA%\Programs\{id}\packages.
             string fallbackPackagesPath = Path.Combine(fallbackDir, "packages");
             var chk1pkgdir = RunCoveredDotnetDeelevated(appPath, ["packagesdir"], installDir, logger);
             Assert.EndsWith(Environment.NewLine + fallbackPackagesPath, chk1pkgdir);
             logger.Info("TEST: packages dir correctly fell back to " + fallbackPackagesPath);
+
+            // state an application used to keep directly under LocalAppData. The downloaded
+            // packages are a cache that may be re-fetched, but the staged rollout identity must
+            // survive the move under Programs or this user's cohort flips.
+            var legacyPackagesPath = Path.Combine(WindowsTestHelper.GetLegacyAppRootDir(id), "packages");
+            var legacyBetaId = Guid.NewGuid();
+            Directory.CreateDirectory(legacyPackagesPath);
+            File.WriteAllText(Path.Combine(legacyPackagesPath, ".betaId"), legacyBetaId.ToString("N"));
 
             // pack v2
             await PackTestAppWithMsi(id, "2.0.0", "version 2 test", releaseDir, logger, InstallLocation.Either);
@@ -762,6 +803,10 @@ public class MsiTests
             var chk2check = RunCoveredDotnetDeelevated(appPath, ["check", releaseDir], installDir, logger);
             Assert.EndsWith(Environment.NewLine + "update: 2.0.0", chk2check);
             logger.Info("TEST: found v2 update (de-elevated)");
+
+            var carriedBetaId = File.ReadAllText(Path.Combine(fallbackPackagesPath, ".betaId")).Trim();
+            Assert.Equal(legacyBetaId.ToString("N"), carriedBetaId);
+            logger.Info("TEST: staged user id carried over from the previous location");
 
             // download update as de-elevated user (nupkg should go to fallback packages dir,
             // and Update.exe should be extracted to the fallback dir)
@@ -808,6 +853,16 @@ public class MsiTests
             try {
                 if (Directory.Exists(fallbackDir)) {
                     IoUtil.Retry(() => IoUtil.DeleteFileOrDirectoryHard(fallbackDir), 10, 1000);
+                }
+            } catch {
+                // best effort cleanup
+            }
+
+            // cleanup the pre-Programs state this test seeded, if the uninstall did not reach it
+            try {
+                var legacyDir = WindowsTestHelper.GetLegacyAppRootDir(id);
+                if (Directory.Exists(legacyDir)) {
+                    IoUtil.DeleteFileOrDirectoryHard(legacyDir);
                 }
             } catch {
                 // best effort cleanup

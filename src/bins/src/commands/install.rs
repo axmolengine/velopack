@@ -35,11 +35,9 @@ pub fn install(pkg: &mut BundleZip, install_to: Option<&PathBuf>, start_args: Op
     }
 
     info!("Determining install directory...");
-    let (root_path, _root_is_default) = if let Some(path) = install_to {
-        (path.clone(), false)
-    } else {
-        let appdata = windows::known_path::get_local_app_data()?;
-        (Path::new(&appdata).join(&app.id), true)
+    let (root_path, stale_root) = match install_to {
+        Some(path) => (path.clone(), None),
+        None => choose_default_root(&app.id)?,
     };
 
     // path needs to exist for future operations (disk space etc)
@@ -153,6 +151,12 @@ pub fn install(pkg: &mut BundleZip, install_to: Option<&PathBuf>, start_args: Op
             info!("Removing rollback directory...");
             let _ = shared::retry_io(|| remove_dir_all::remove_dir_all(&renamed));
         }
+        if let Some(stale_root) = &stale_root {
+            // Only once the new shortcuts exist, so the app is never left without one. The
+            // directory itself is the user's and is left alone.
+            info!("Removing shortcuts of the superseded installation at {:?}", stale_root);
+            windows::remove_all_shortcuts_for_root_dir(stale_root);
+        }
     } else {
         error!("Installation failed!");
         if let Some(renamed) = root_path_renamed {
@@ -165,6 +169,41 @@ pub fn install(pkg: &mut BundleZip, install_to: Option<&PathBuf>, start_args: Op
     }
 
     Ok(())
+}
+
+/// Picks where a per-user install goes, and returns the directory of a previous installation
+/// whose shortcuts must be removed alongside it.
+fn choose_default_root(app_id: &str) -> Result<(PathBuf, Option<PathBuf>)> {
+    let default_root = velopack::known_path::default_app_root_dir(app_id)?;
+    let legacy_root = velopack::known_path::legacy_app_root_dir(app_id)?;
+    Ok(select_root(&default_root, &legacy_root))
+}
+
+/// Apps used to be installed directly in LocalAppData rather than in a `Programs` sub-directory,
+/// so an existing install there is upgraded in place instead of being left behind as a second copy
+/// that the old one's shortcuts would still launch. Split out from `choose_default_root` so the
+/// decision can be tested without writing into a real user's profile.
+fn select_root(default_root: &Path, legacy_root: &Path) -> (PathBuf, Option<PathBuf>) {
+    if !is_existing_app_install(legacy_root) {
+        return (default_root.to_path_buf(), None);
+    }
+
+    if shared::is_dir_empty(default_root) {
+        info!("Upgrading installation found at the previous location: {:?}", legacy_root);
+        return (legacy_root.to_path_buf(), None);
+    }
+
+    (default_root.to_path_buf(), Some(legacy_root.to_path_buf()))
+}
+
+/// True if the app is (or was) installed here, as opposed to only keeping downloaded packages here.
+/// An install with a read-only root - a Program Files MSI, for instance - leaves just an
+/// `Update.exe` and a `packages` directory in the user's LocalAppData, with no `current` directory.
+/// That must not be adopted as an install root, or it would be renamed away and the other
+/// install's downloads destroyed. The `app-*` case is a legacy Squirrel/Clowd layout, which is
+/// migrated in place today and has no manifest to check for.
+fn is_existing_app_install(dir: &Path) -> bool {
+    velopack::locator::is_velopack_root(dir) || (dir.join("Update.exe").is_file() && shared::has_app_prefixed_folder(dir))
 }
 
 fn format_disk_space(bytes: u64) -> String {
@@ -180,9 +219,93 @@ fn format_disk_space(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn format_disk_space_uses_byte_units() {
         assert_eq!(super::format_disk_space(832_980_000), "832.98 MB");
+    }
+
+    fn write_installed_app(dir: &Path) {
+        std::fs::create_dir_all(dir.join("current")).unwrap();
+        std::fs::write(dir.join("Update.exe"), b"update").unwrap();
+        std::fs::write(dir.join("current").join("sq.version"), b"nuspec").unwrap();
+    }
+
+    /// A Squirrel/Clowd install predates `current` and `sq.version`.
+    fn write_legacy_app(dir: &Path) {
+        std::fs::create_dir_all(dir.join("app-1.0.0")).unwrap();
+        std::fs::write(dir.join("Update.exe"), b"update").unwrap();
+    }
+
+    /// What an install with a read-only root leaves behind: no `current`, so not an install.
+    fn write_package_cache(dir: &Path) {
+        std::fs::create_dir_all(dir.join("packages")).unwrap();
+        std::fs::write(dir.join("Update.exe"), b"update").unwrap();
+    }
+
+    #[test]
+    fn a_clean_machine_installs_under_programs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let default_root = tmp.path().join("Programs").join("CoolApp");
+        let legacy_root = tmp.path().join("CoolApp");
+
+        let (root, stale) = select_root(&default_root, &legacy_root);
+
+        assert_eq!(root, default_root);
+        assert_eq!(stale, None);
+    }
+
+    #[test]
+    fn an_existing_install_is_upgraded_in_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let default_root = tmp.path().join("Programs").join("CoolApp");
+        let legacy_root = tmp.path().join("CoolApp");
+        write_installed_app(&legacy_root);
+
+        let (root, stale) = select_root(&default_root, &legacy_root);
+
+        assert_eq!(root, legacy_root);
+        assert_eq!(stale, None);
+    }
+
+    #[test]
+    fn a_legacy_squirrel_install_is_upgraded_in_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let default_root = tmp.path().join("Programs").join("CoolApp");
+        let legacy_root = tmp.path().join("CoolApp");
+        write_legacy_app(&legacy_root);
+
+        let (root, _) = select_root(&default_root, &legacy_root);
+
+        assert_eq!(root, legacy_root);
+    }
+
+    #[test]
+    fn a_package_cache_is_not_adopted_as_an_install() {
+        let tmp = tempfile::tempdir().unwrap();
+        let default_root = tmp.path().join("Programs").join("CoolApp");
+        let legacy_root = tmp.path().join("CoolApp");
+        write_package_cache(&legacy_root);
+
+        let (root, stale) = select_root(&default_root, &legacy_root);
+
+        assert_eq!(root, default_root);
+        assert_eq!(stale, None);
+    }
+
+    #[test]
+    fn an_installed_programs_root_wins_and_the_old_shortcuts_go() {
+        let tmp = tempfile::tempdir().unwrap();
+        let default_root = tmp.path().join("Programs").join("CoolApp");
+        let legacy_root = tmp.path().join("CoolApp");
+        write_installed_app(&legacy_root);
+        std::fs::create_dir_all(default_root.join("current")).unwrap();
+
+        let (root, stale) = select_root(&default_root, &legacy_root);
+
+        assert_eq!(root, default_root);
+        assert_eq!(stale, Some(legacy_root));
     }
 }
 

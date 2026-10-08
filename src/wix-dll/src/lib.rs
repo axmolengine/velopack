@@ -101,14 +101,17 @@ pub extern "system" fn CleanupDeferred(h_install: MSIHANDLE) -> c_uint {
             }
         }
 
+        let app_id = app_id.map(str::trim).filter(|id| !id.is_empty());
         if let Some(app_id) = app_id {
-            if let Ok(appdata) = std::env::var("LOCALAPPDATA") {
-                let velopack_app_dir = PathBuf::from(appdata).join(app_id);
-                if let Err(e) = remove_dir_all::remove_dir_all(&velopack_app_dir) {
-                    show_debug_message(
-                        "CleanupDeferred",
-                        format!("Failed to remove local app data directory: {:?} {}", velopack_app_dir, e),
-                    );
+            // The packages and the copied Update.exe that an install with a read-only root keeps
+            // in the user's profile. Applications moved from LocalAppData into the Programs
+            // directory under it, so both locations are candidates.
+            for candidate in velopack::known_path::app_root_candidates(app_id) {
+                if !is_leftover_package_cache(&candidate) {
+                    continue;
+                }
+                if let Err(e) = remove_dir_all::remove_dir_all(&candidate) {
+                    show_debug_message("CleanupDeferred", format!("Failed to remove app directory: {:?} {}", candidate, e));
                 }
             }
 
@@ -125,6 +128,16 @@ pub extern "system" fn CleanupDeferred(h_install: MSIHANDLE) -> c_uint {
     }
 
     ERROR_SUCCESS.0
+}
+
+/// True for a directory that only holds an application's downloaded packages plus a copy of
+/// Update.exe, which is what an install with a read-only root leaves in the user's profile.
+/// A directory that is itself an installed application is not - the same id can be installed a
+/// second time, and other publishers' applications share the Programs directory.
+fn is_leftover_package_cache(dir: &Path) -> bool {
+    dir.is_dir()
+        && !velopack::locator::is_velopack_root(dir)
+        && (dir.join("packages").is_dir() || dir.join("Update.exe").is_file())
 }
 
 #[no_mangle]
