@@ -18,8 +18,6 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
-    outputs:
-      pkg_version: ${{ steps.version.outputs.pkg_version }}
     steps:
       - name: Download build version
         uses: actions/download-artifact@v8
@@ -34,7 +32,6 @@ jobs:
         run: |
           version=$(cat version.txt | xargs)
           echo "PKG_VERSION=$version" >> $GITHUB_ENV
-          echo "pkg_version=$version" >> $GITHUB_OUTPUT
 
       - name: Download vpk
         uses: actions/download-artifact@v8
@@ -158,10 +155,12 @@ jobs:
           Write-Host "Current tag: $currentTag"
           Write-Host "Previous tag: $previousTag"
 
-          # Push the tag to the repository
+          # Push the tag to the repository. HEAD is detached at the release commit (we checked
+          # out the commit this run was built from), so push the tag ref explicitly - a plain
+          # `git push origin <tag>` would also try to push the detached HEAD and be rejected.
           Write-Host "Tagging release commit..."
           git tag $currentTag
-          git push origin $currentTag
+          git push origin "refs/tags/$currentTag"
 
           # Generate release notes
           Write-Host "Generating release notes..."
@@ -173,7 +172,7 @@ jobs:
               "tag_name" = "$currentTag"
               "previous_tag_name" = "$previousTag"
           } | ConvertTo-Json
-          $apiUrl = "https://api.github.com/repos/velopack/velopack/releases/generate-notes"
+          $apiUrl = "$($env:GITHUB_API_URL)/repos/$($env:GITHUB_REPOSITORY)/releases/generate-notes"
           $response = Invoke-RestMethod -Uri $apiUrl -Method Post -Headers $headers -Body $body -ContentType 'application/json'
 
           $releaseName = $response.name
@@ -222,96 +221,3 @@ jobs:
           gh release upload $currentTag (get-item ../lib-rust/*.crate)
           gh release upload $currentTag (get-item ../lib-c/*.zip)
           gh release upload $currentTag (get-item ../lib-python/*.zip)
-
-  publish-nuget:
-    needs: release
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download NuGet packages
-        uses: actions/download-artifact@v8
-        with:
-          name: packages
-          run-id: ${{ github.event.inputs.workflow_run_id }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: ./packages
-
-      - name: NuGet login (OIDC)
-        uses: NuGet/login@v1
-        id: login
-        with:
-          user: caesay
-
-      - name: Publish NuGet Packages
-        run: |
-          for f in packages/*.nupkg; do
-            dotnet nuget push "$f" -k ${{ steps.login.outputs.NUGET_API_KEY }} -s https://api.nuget.org/v3/index.json --skip-duplicate
-          done
-
-  publish-npm:
-    needs: release
-    runs-on: ubuntu-latest
-    env:
-      PKG_VERSION: ${{ needs.release.outputs.pkg_version }}
-    steps:
-      - name: Download NPM package
-        uses: actions/download-artifact@v8
-        with:
-          name: lib-nodejs
-          run-id: ${{ github.event.inputs.workflow_run_id }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: ./lib-nodejs
-
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          registry-url: 'https://registry.npmjs.org'
-
-      - name: Publish NPM Package
-        working-directory: ./lib-nodejs
-        run: npm publish velopack-$PKG_VERSION.tgz --access public --tag latest --provenance
-
-  publish-crate:
-    needs: release
-    runs-on: ubuntu-latest
-    env:
-      PKG_VERSION: ${{ needs.release.outputs.pkg_version }}
-    steps:
-      - name: Download Rust crate
-        uses: actions/download-artifact@v8
-        with:
-          name: lib-rust
-          run-id: ${{ github.event.inputs.workflow_run_id }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: ./lib-rust
-
-      - uses: rust-lang/crates-io-auth-action@v1
-        id: auth
-
-      - name: Publish Rust Crate
-        working-directory: ./lib-rust
-        run: |
-          tar -xzf velopack-$PKG_VERSION.crate
-          cd velopack-$PKG_VERSION
-          rm Cargo.toml.orig
-          rm .cargo_vcs_info.json
-          cargo publish --allow-dirty --no-verify
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-
-  publish-pypi:
-    needs: release
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download Python package
-        uses: actions/download-artifact@v8
-        with:
-          name: lib-python
-          run-id: ${{ github.event.inputs.workflow_run_id }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: ./lib-python-files
-
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: lib-python-files/
-          verbose: true
